@@ -777,20 +777,21 @@ func (m *Manager) executeLockTransfer(ctx *execContext, item *model.HandoverReso
 		return fmt.Errorf("lock no longer held by source")
 	}
 
-	if err := m.storage.TransferLockHolder(item.ResourceKey, h.ToCaller, now); err != nil {
-		return err
-	}
-
+	// Migrate the lock holder and its active lease together so that a lease
+	// transfer failure cannot leave the lock pointing at the new holder while
+	// the lease still belongs to the source (a half migration).
 	lease, _ := m.storage.GetActiveLease(item.ResourceKey)
+	var newExpires *time.Time
 	if lease != nil {
 		remaining := time.Until(lease.ExpiresAt)
 		if remaining < 0 {
 			remaining = 0
 		}
-		newExpires := now.Add(remaining)
-		if err := m.storage.TransferLeaseHolder(item.ResourceKey, h.ToCaller, newExpires, now); err != nil {
-			return err
-		}
+		expires := now.Add(remaining)
+		newExpires = &expires
+	}
+	if err := m.storage.TransferLockAndLease(item.ResourceKey, h.ToCaller, newExpires, now); err != nil {
+		return err
 	}
 	ctx.appliedLocks = append(ctx.appliedLocks, item.ResourceKey)
 	return nil
@@ -890,10 +891,12 @@ func (m *Manager) rollbackAllLocked(ctx *execContext, h *model.Handover, now tim
 	}
 	for i := len(ctx.appliedLocks) - 1; i >= 0; i-- {
 		lease, _ := m.storage.GetActiveLease(ctx.appliedLocks[i])
+		var newExpires *time.Time
 		if lease != nil {
-			_ = m.storage.TransferLeaseHolder(ctx.appliedLocks[i], h.FromCaller, lease.ExpiresAt, now)
+			expires := lease.ExpiresAt
+			newExpires = &expires
 		}
-		_ = m.storage.TransferLockHolder(ctx.appliedLocks[i], h.FromCaller, now)
+		_ = m.storage.TransferLockAndLease(ctx.appliedLocks[i], h.FromCaller, newExpires, now)
 	}
 }
 
