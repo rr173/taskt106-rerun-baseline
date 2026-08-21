@@ -1,11 +1,48 @@
 package fencing
 
 import (
+	"errors"
 	"path/filepath"
 	"task106/internal/storage"
 	"testing"
 	"time"
 )
+
+type failingEventStore struct {
+	*storage.Storage
+	failEvents bool
+}
+
+func (f *failingEventStore) RecordCoordinationEvent(eventType, resourcePath, holder, detail string) error {
+	if f.failEvents {
+		return errors.New("event store unavailable")
+	}
+	return f.Storage.RecordCoordinationEvent(eventType, resourcePath, holder, detail)
+}
+
+func TestIssueLeavesNoTokenWhenCoordinationEventFails(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "fencing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	wrapped := &failingEventStore{Storage: store, failEvents: true}
+	manager := NewManager(wrapped)
+	now := time.Now().UTC()
+
+	if _, err := manager.Issue("prod/db", "worker-a", 60, now); err == nil {
+		t.Fatal("issue should fail when coordination event recording fails")
+	}
+
+	tokens, err := store.ListFencingTokens("prod/db", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("no token should remain after failed issue, got %v", tokens)
+	}
+}
+
 
 func TestFencingSequencesPersistAndRevocationIsObservable(t *testing.T) {
 	store, err := storage.New(filepath.Join(t.TempDir(), "fencing.db"))

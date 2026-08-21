@@ -71,6 +71,11 @@ func (s *Storage) RevokeFencingToken(token, reason string, now time.Time) error 
 	return err
 }
 
+func (s *Storage) DeleteFencingToken(token string) error {
+	_, err := s.db.Exec(`DELETE FROM coord_fencing_tokens WHERE token = ?`, token)
+	return err
+}
+
 func (s *Storage) ListFencingTokens(resourcePath string, limit int) ([]model.FencingToken, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100

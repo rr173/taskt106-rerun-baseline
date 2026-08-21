@@ -1,6 +1,7 @@
 package fencing
 
 import (
+	"fmt"
 	"task106/internal/model"
 	"time"
 )
@@ -20,7 +21,12 @@ func (m *Manager) Issue(resourcePath, holder string, leaseSec int, now time.Time
 		return "", err
 	}
 	if err := m.store.RecordCoordinationEvent("fencing_issued", resourcePath, holder, token.Token); err != nil {
-		return "", err
+		// Issuing a token and recording the coordination event must succeed together:
+		// if the event record fails, the token must not remain visible to callers.
+		if derr := m.store.DeleteFencingToken(token.Token); derr != nil {
+			return "", fmt.Errorf("record coordination event: %w (rollback: %v)", err, derr)
+		}
+		return "", fmt.Errorf("record coordination event: %w", err)
 	}
 	return token.Token, nil
 }
