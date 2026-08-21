@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"task106/internal/debt"
 	"task106/internal/lock"
 	"task106/internal/model"
@@ -11,20 +12,19 @@ import (
 	"task106/internal/ratelimit"
 	"task106/internal/storage"
 	"task106/internal/topology"
-	"sync"
 	"time"
 )
 
 type Manager struct {
-	storage   *storage.Storage
-	lockMgr   *lock.Manager
-	rlMgr     *ratelimit.Manager
-	orchMgr   *orchestration.Manager
-	topoMgr   *topology.Manager
-	debtMgr   *debt.Manager
-	mu        sync.Mutex
-	stopCh    chan struct{}
-	ticker    *time.Ticker
+	storage *storage.Storage
+	lockMgr *lock.Manager
+	rlMgr   *ratelimit.Manager
+	orchMgr *orchestration.Manager
+	topoMgr *topology.Manager
+	debtMgr *debt.Manager
+	mu      sync.Mutex
+	stopCh  chan struct{}
+	ticker  *time.Ticker
 }
 
 func NewManager(s *storage.Storage, lm *lock.Manager, rlm *ratelimit.Manager,
@@ -111,15 +111,15 @@ func (m *Manager) CreateHandover(req *model.CreateHandoverRequest) (*model.Hando
 
 	now := time.Now()
 	h := &model.Handover{
-		FromCaller:       req.FromCaller,
-		ToCaller:         req.ToCaller,
-		Status:           model.HandoverStatusCreated,
-		Initiator:        req.Initiator,
-		Description:      req.Description,
-		NeedConfirm:      req.NeedConfirm,
+		FromCaller:        req.FromCaller,
+		ToCaller:          req.ToCaller,
+		Status:            model.HandoverStatusCreated,
+		Initiator:         req.Initiator,
+		Description:       req.Description,
+		NeedConfirm:       req.NeedConfirm,
 		ConfirmTimeoutSec: req.ConfirmTimeoutSec,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 
 	deadline := now.Add(time.Duration(req.ConfirmTimeoutSec) * time.Second)
@@ -151,13 +151,13 @@ func (m *Manager) CreateHandover(req *model.CreateHandoverRequest) (*model.Hando
 
 	for _, lockName := range allLockNames {
 		item := &model.HandoverResourceItem{
-			HandoverID:    h.ID,
-			ResourceType:  model.HandoverResourceLock,
-			ResourceKey:   lockName,
-			ResourceName:  lockName,
+			HandoverID:     h.ID,
+			ResourceType:   model.HandoverResourceLock,
+			ResourceKey:    lockName,
+			ResourceName:   lockName,
 			PreCheckStatus: model.PreCheckOK,
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 		if err := m.storage.AddHandoverResource(item); err != nil {
 			return nil, fmt.Errorf("add lock resource: %w", err)
@@ -166,13 +166,13 @@ func (m *Manager) CreateHandover(req *model.CreateHandoverRequest) (*model.Hando
 
 	for _, callerID := range req.QuotaCallers {
 		item := &model.HandoverResourceItem{
-			HandoverID:    h.ID,
-			ResourceType:  model.HandoverResourceQuota,
-			ResourceKey:   callerID,
-			ResourceName:  "quota:" + callerID,
+			HandoverID:     h.ID,
+			ResourceType:   model.HandoverResourceQuota,
+			ResourceKey:    callerID,
+			ResourceName:   "quota:" + callerID,
 			PreCheckStatus: model.PreCheckOK,
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 		if err := m.storage.AddHandoverResource(item); err != nil {
 			return nil, fmt.Errorf("add quota resource: %w", err)
@@ -181,13 +181,13 @@ func (m *Manager) CreateHandover(req *model.CreateHandoverRequest) (*model.Hando
 
 	for _, txID := range req.OrchTxIDs {
 		item := &model.HandoverResourceItem{
-			HandoverID:    h.ID,
-			ResourceType:  model.HandoverResourceOrchTx,
-			ResourceKey:   txID,
-			ResourceName:  "tx:" + txID,
+			HandoverID:     h.ID,
+			ResourceType:   model.HandoverResourceOrchTx,
+			ResourceKey:    txID,
+			ResourceName:   "tx:" + txID,
 			PreCheckStatus: model.PreCheckOK,
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 		if err := m.storage.AddHandoverResource(item); err != nil {
 			return nil, fmt.Errorf("add orch tx resource: %w", err)
@@ -196,13 +196,13 @@ func (m *Manager) CreateHandover(req *model.CreateHandoverRequest) (*model.Hando
 
 	for _, rootName := range req.TopologyRoots {
 		item := &model.HandoverResourceItem{
-			HandoverID:    h.ID,
-			ResourceType:  model.HandoverResourceTopology,
-			ResourceKey:   rootName,
-			ResourceName:  "topology:" + rootName,
+			HandoverID:     h.ID,
+			ResourceType:   model.HandoverResourceTopology,
+			ResourceKey:    rootName,
+			ResourceName:   "topology:" + rootName,
 			PreCheckStatus: model.PreCheckOK,
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 		if err := m.storage.AddHandoverResource(item); err != nil {
 			return nil, fmt.Errorf("add topology resource: %w", err)
@@ -211,13 +211,13 @@ func (m *Manager) CreateHandover(req *model.CreateHandoverRequest) (*model.Hando
 
 	for _, rid := range req.ReservationIDs {
 		item := &model.HandoverResourceItem{
-			HandoverID:    h.ID,
-			ResourceType:  model.HandoverResourceReservation,
-			ResourceKey:   fmt.Sprintf("%d", rid),
-			ResourceName:  fmt.Sprintf("reservation:%d", rid),
+			HandoverID:     h.ID,
+			ResourceType:   model.HandoverResourceReservation,
+			ResourceKey:    fmt.Sprintf("%d", rid),
+			ResourceName:   fmt.Sprintf("reservation:%d", rid),
 			PreCheckStatus: model.PreCheckOK,
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 		if err := m.storage.AddHandoverResource(item); err != nil {
 			return nil, fmt.Errorf("add reservation resource: %w", err)
@@ -513,8 +513,8 @@ func (m *Manager) preCheckTopology(item *model.HandoverResourceItem, h *model.Ha
 	}
 
 	snap := map[string]interface{}{
-		"root":       item.ResourceKey,
-		"nodes":      allNodes,
+		"root":        item.ResourceKey,
+		"nodes":       allNodes,
 		"from_caller": h.FromCaller,
 	}
 	item.Snapshot = toJSON(snap)
@@ -811,33 +811,27 @@ func (m *Manager) executeQuotaTransfer(ctx *execContext, item *model.HandoverRes
 			CallerID:   h.ToCaller,
 			PolicyName: fromBinding.PolicyName,
 			QuotaLimit: fromBinding.QuotaLimit,
-			UsedTokens: fromBinding.UsedTokens,
-			BorrowedTokens: fromBinding.BorrowedTokens,
-			LentTokens: fromBinding.LentTokens,
-			ReservedTokens: fromBinding.ReservedTokens,
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		if err := m.storage.UpsertCallerBinding(toBinding); err != nil {
-			return err
-		}
-	} else {
-		toBinding.UsedTokens += fromBinding.UsedTokens
-		toBinding.BorrowedTokens += fromBinding.BorrowedTokens
-		toBinding.LentTokens += fromBinding.LentTokens
-		toBinding.ReservedTokens += fromBinding.ReservedTokens
-		toBinding.UpdatedAt = now
-		if err := m.storage.UpdateCallerBinding(toBinding); err != nil {
-			return err
+			CreatedAt:  now,
 		}
 	}
+
+	// Compute the final state for both callers first, without writing, so
+	// that a failure on either side never leaves the other side changed.
+	// TransferCallerBindingQuota commits both writes atomically: either both
+	// succeed, or the original values are preserved on both sides.
+	toBinding.UsedTokens += fromBinding.UsedTokens
+	toBinding.BorrowedTokens += fromBinding.BorrowedTokens
+	toBinding.LentTokens += fromBinding.LentTokens
+	toBinding.ReservedTokens += fromBinding.ReservedTokens
+	toBinding.UpdatedAt = now
 
 	fromBinding.UsedTokens = 0
 	fromBinding.BorrowedTokens = 0
 	fromBinding.LentTokens = 0
 	fromBinding.ReservedTokens = 0
 	fromBinding.UpdatedAt = now
-	if err := m.storage.UpdateCallerBinding(fromBinding); err != nil {
+
+	if err := m.storage.TransferCallerBindingQuota(fromBinding, toBinding, now); err != nil {
 		return err
 	}
 

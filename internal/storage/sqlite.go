@@ -1485,6 +1485,71 @@ func (s *Storage) UpdateCallerBinding(b *model.CallerBinding) error {
 	return err
 }
 
+// TransferCallerBindingQuota atomically moves the source caller's used quota
+// to the target caller for a handover. Both bindings are written inside a
+// single transaction: either both updates commit, or neither does. This avoids
+// the inconsistency where the receiver's used quota is already changed while
+// the source update fails. fromBinding/toBinding carry the final desired
+// state for each caller.
+func (s *Storage) TransferCallerBindingQuota(fromBinding, toBinding *model.CallerBinding, now time.Time) error {
+	if fromBinding == nil || toBinding == nil {
+		return fmt.Errorf("source and target binding are required")
+	}
+	if fromBinding.CallerID == "" || toBinding.CallerID == "" {
+		return fmt.Errorf("source and target caller are required")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	writeBinding := func(b *model.CallerBinding, exists bool) error {
+		if exists {
+			_, err := tx.Exec(`
+				UPDATE rl_caller_bindings SET
+					policy_name = ?,
+					quota_limit = ?,
+					used_tokens = ?,
+					borrowed_tokens = ?,
+					lent_tokens = ?,
+					reserved_tokens = ?,
+					last_refill_at = ?,
+					window_start_at = ?,
+					prev_window_count = ?,
+					curr_window_count = ?,
+					updated_at = ?
+				WHERE caller_id = ?
+			`, b.PolicyName, b.QuotaLimit, b.UsedTokens, b.BorrowedTokens, b.LentTokens, b.ReservedTokens,
+				nullTime(b.LastRefillAt), nullTime(b.WindowStartAt), b.PrevWindowCount, b.CurrWindowCount,
+				b.UpdatedAt, b.CallerID)
+			return err
+		}
+		res, err := tx.Exec(`
+			INSERT INTO rl_caller_bindings (caller_id, policy_name, quota_limit, used_tokens, borrowed_tokens, lent_tokens, reserved_tokens, last_refill_at, window_start_at, prev_window_count, curr_window_count, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, b.CallerID, b.PolicyName, b.QuotaLimit, b.UsedTokens, b.BorrowedTokens, b.LentTokens, b.ReservedTokens,
+			nullTime(b.LastRefillAt), nullTime(b.WindowStartAt), b.PrevWindowCount, b.CurrWindowCount, b.CreatedAt, b.UpdatedAt)
+		if err != nil {
+			return err
+		}
+		if b.ID == 0 {
+			b.ID, _ = res.LastInsertId()
+		}
+		return nil
+	}
+
+	if err := writeBinding(fromBinding, fromBinding.ID != 0); err != nil {
+		return fmt.Errorf("update source caller binding: %w", err)
+	}
+	if err := writeBinding(toBinding, toBinding.ID != 0); err != nil {
+		return fmt.Errorf("update target caller binding: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 func (s *Storage) AddRateLimitEvent(e *model.RateLimitEvent) error {
 	allowedInt := 0
 	if e.Allowed {
