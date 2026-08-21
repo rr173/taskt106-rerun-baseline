@@ -57,8 +57,8 @@ func (m *Manager) Revoke(token, reason string, now time.Time) error {
 	if item == nil {
 		return ErrTokenNotFound
 	}
-	if err := m.store.RevokeFencingToken(token, reason, now); err != nil {
-		return err
-	}
-	return m.store.RecordCoordinationEvent("fencing_revoked", item.ResourcePath, item.Holder, reason)
+	// Mark the token revoked and record the coordination event in a single
+	// transaction so that a failure to write the event rolls back the token
+	// update as well — the token must not appear revoked without its audit trail.
+	return m.store.RevokeFencingTokenWithEvent(token, reason, item.ResourcePath, item.Holder, now)
 }
