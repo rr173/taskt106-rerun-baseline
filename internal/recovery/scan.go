@@ -1,8 +1,10 @@
 package recovery
 
 import (
+	"errors"
 	"fmt"
 	"task106/internal/model"
+	resourcerepo "task106/internal/resource"
 )
 
 func (m *Manager) scanIssues() ([]string, error) {
@@ -12,15 +14,19 @@ func (m *Manager) scanIssues() ([]string, error) {
 	}
 	issues := make([]string, 0)
 	for _, lease := range leases {
-		resource, err := m.resources.Get(lease.LockName)
+		item, err := m.resources.Get(lease.LockName)
 		if err != nil {
+			if errors.Is(err, resourcerepo.ErrNotFound) {
+				issues = append(issues, fmt.Sprintf("active lease %s references missing resource", lease.LockName))
+				continue
+			}
 			return nil, err
 		}
-		if resource == nil {
+		if item == nil {
 			issues = append(issues, fmt.Sprintf("active lease %s has no registered resource", lease.LockName))
 			continue
 		}
-		if resource.State == model.ResourceRetired {
+		if item.State == model.ResourceRetired {
 			issues = append(issues, fmt.Sprintf("retired resource %s still has active lease", lease.LockName))
 		}
 		if lease.ExpiresAt.IsZero() {
