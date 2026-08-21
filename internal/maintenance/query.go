@@ -36,6 +36,7 @@ func (m *Manager) Cancel(id int64, operator string) error {
 	if window.Status == "cancelled" || window.Status == "completed" {
 		return ErrWindowClosed
 	}
+	previousStatus := window.Status
 	if err := m.store.UpdateMaintenanceStatus(id, "cancelled"); err != nil {
 		return err
 	}
@@ -43,5 +44,14 @@ func (m *Manager) Cancel(id int64, operator string) error {
 	m.mu.Lock()
 	m.windows[id] = window
 	m.mu.Unlock()
-	return m.store.RecordCoordinationEvent("maintenance_cancelled", window.ResourcePath, operator, window.Reason)
+	if err := m.store.RecordCoordinationEvent("maintenance_cancelled", window.ResourcePath, operator, window.Reason); err != nil {
+		// Roll back the cancellation so the window keeps its pre-cancel status.
+		_ = m.store.UpdateMaintenanceStatus(id, previousStatus)
+		window.Status = previousStatus
+		m.mu.Lock()
+		m.windows[id] = window
+		m.mu.Unlock()
+		return err
+	}
+	return nil
 }
