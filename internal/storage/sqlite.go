@@ -3465,6 +3465,36 @@ func (s *Storage) UpdateHandoverStatus(id int64, status model.HandoverStatus, up
 	return err
 }
 
+// CancelHandoverWithTimeline atomically marks a handover as cancelled and
+// appends the corresponding timeline entry within a single transaction. Both
+// operations commit together or roll back together, so a failure to record the
+// cancel timeline leaves the handover in its original status instead of a
+// cancelled state with a missing audit trail.
+func (s *Storage) CancelHandoverWithTimeline(handoverID int64, cancelledAt time.Time, cancelReason, operator string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+		UPDATE handovers
+		SET status = ?, cancelled_at = ?, cancel_reason = ?, updated_at = ?
+		WHERE id = ?
+	`, model.HandoverStatusCancelled, cancelledAt, cancelReason, cancelledAt, handoverID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO handover_timeline (handover_id, status, operator, detail, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, handoverID, model.HandoverStatusCancelled, operator, cancelReason, cancelledAt); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 func (s *Storage) GetHandover(id int64) (*model.Handover, error) {
 	row := s.db.QueryRow(`
 		SELECT id, from_caller, to_caller, status, initiator, description,
