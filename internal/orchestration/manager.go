@@ -14,6 +14,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// defaultTimeoutRetry is how soon a timed-out transaction retries persisting
+// its timed_out state when the state-change record could not be written.
+const defaultTimeoutRetry = 5 * time.Second
+
 type Manager struct {
 	storage     *storage.Storage
 	lockMgr     *lock.Manager
@@ -92,7 +96,29 @@ func (m *Manager) stopTxTimerLocked(txID string) {
 	}
 }
 
-func (m *Manager) addStateChangeLocked(txID string, from, to model.TxStatus, reason string) {
+// transitionTxStatusLocked moves a transaction to a new status and records the
+// matching state-change (audit) entry in a single atomic storage operation. The
+// two writes succeed or fail together: if the audit record cannot be persisted
+// the status is left untouched, so a transaction is never observed in a state
+// whose transition was never recorded. Callers must act on the returned error
+// to avoid reporting a successful release/timeout whose audit trail is broken.
+func (m *Manager) transitionTxStatusLocked(txID string, from, to model.TxStatus, reason string) error {
+	now := time.Now()
+	change := &model.TxStateChange{
+		TxID:      txID,
+		FromState: from,
+		ToState:   to,
+		Reason:    reason,
+		CreatedAt: now,
+	}
+	return m.storage.UpdateOrchTxStatusWithChange(txID, to, "", now, change)
+}
+
+// recordTxStateChangeLocked best-effort records a state change that has no
+// associated status transition (e.g. the initial creation log). It is kept
+// separate from transitionTxStatusLocked because the row is created by a
+// separate INSERT and the status never moves out of the created state.
+func (m *Manager) recordTxStateChangeLocked(txID string, from, to model.TxStatus, reason string) {
 	sc := &model.TxStateChange{
 		TxID:      txID,
 		FromState: from,
@@ -100,7 +126,9 @@ func (m *Manager) addStateChangeLocked(txID string, from, to model.TxStatus, rea
 		Reason:    reason,
 		CreatedAt: time.Now(),
 	}
-	_ = m.storage.AddTxStateChange(sc)
+	if err := m.storage.AddTxStateChange(sc); err != nil {
+		log.Printf("[orchestration-manager] failed to record tx state change: tx=%s from=%s to=%s err=%v", txID, from, to, err)
+	}
 }
 
 func (m *Manager) PreCheck(locks []model.TxLockSpec, tokens []model.TxTokenSpec) (*model.PreCheckResult, error) {
@@ -174,7 +202,7 @@ func (m *Manager) CreateTx(holder string, timeoutSec int, lockSpecs []model.TxLo
 	if err := m.storage.CreateOrchTx(tx); err != nil {
 		return nil, err
 	}
-	m.addStateChangeLocked(txID, "", model.TxStatusCreated, "transaction created")
+	m.recordTxStateChangeLocked(txID, "", model.TxStatusCreated, "transaction created")
 
 	acquiredLocks := make([]string, 0)
 	grantedTokens := make([]model.TxToken, 0)
@@ -256,8 +284,20 @@ func (m *Manager) CreateTx(holder string, timeoutSec int, lockSpecs []model.TxLo
 		tx.Status = model.TxStatusRolledBack
 		tx.FailReason = failReason
 		tx.UpdatedAt = time.Now()
-		_ = m.storage.UpdateOrchTxStatus(txID, model.TxStatusRolledBack, failReason, tx.UpdatedAt)
-		m.addStateChangeLocked(txID, model.TxStatusCreated, model.TxStatusRolledBack, failReason)
+		if err := m.transitionTxStatusLocked(txID, model.TxStatusCreated, model.TxStatusRolledBack, failReason); err != nil {
+			// The rollback status and its audit record must stay consistent: if
+			// the state change could not be persisted the transaction stays in
+			// its prior committed/created state rather than reporting a rolled
+			// back transition whose record is missing.
+			tx.Status = model.TxStatusCreated
+			tx.FailReason = ""
+			log.Printf("[orchestration-manager] failed to persist rollback: tx=%s err=%v", txID, err)
+			detailTx, _ := m.loadTxDetailLocked(txID)
+			if detailTx != nil {
+				return detailTx, fmt.Errorf("persist rollback state: %w", err)
+			}
+			return nil, fmt.Errorf("persist rollback state: %w", err)
+		}
 
 		detailTx, _ := m.loadTxDetailLocked(txID)
 		return detailTx, nil
@@ -265,8 +305,21 @@ func (m *Manager) CreateTx(holder string, timeoutSec int, lockSpecs []model.TxLo
 
 	tx.Status = model.TxStatusCommitted
 	tx.UpdatedAt = time.Now()
-	_ = m.storage.UpdateOrchTxStatus(txID, model.TxStatusCommitted, "", tx.UpdatedAt)
-	m.addStateChangeLocked(txID, model.TxStatusCreated, model.TxStatusCommitted, "all locks and tokens acquired")
+	if err := m.transitionTxStatusLocked(txID, model.TxStatusCreated, model.TxStatusCommitted, "all locks and tokens acquired"); err != nil {
+		// Do not surface a committed transaction whose state-change record
+		// never persisted; the in-memory status is reverted so the caller
+		// cannot release a transaction that was never durably committed.
+		tx.Status = model.TxStatusCreated
+		log.Printf("[orchestration-manager] failed to persist commit: tx=%s err=%v", txID, err)
+		for i := len(grantedTokens) - 1; i >= 0; i-- {
+			_ = m.rlMgr.ReturnTokens(grantedTokens[i].CallerID, grantedTokens[i].Tokens)
+		}
+		for i := len(acquiredLocks) - 1; i >= 0; i-- {
+			_, _ = m.lockMgr.ReleaseLock(acquiredLocks[i], holder)
+		}
+		_, _ = m.lockMgr.CancelWaitForHolder(holder)
+		return nil, fmt.Errorf("persist commit state: %w", err)
+	}
 
 	m.setTxTimerLocked(txID, time.Duration(timeoutSec)*time.Second)
 
@@ -308,8 +361,16 @@ func (m *Manager) ReleaseTx(txID string, callerHolder string) (*model.Orchestrat
 
 	tx.Status = model.TxStatusReleased
 	tx.UpdatedAt = time.Now()
-	_ = m.storage.UpdateOrchTxStatus(txID, model.TxStatusReleased, "", tx.UpdatedAt)
-	m.addStateChangeLocked(txID, model.TxStatusCommitted, model.TxStatusReleased, "manual release")
+	if err := m.transitionTxStatusLocked(txID, model.TxStatusCommitted, model.TxStatusReleased, "manual release"); err != nil {
+		// The release result and the state-change record must stay consistent.
+		// If the audit record could not be persisted, the transaction is not
+		// moved to the released state, so a caller retrying the release still
+		// sees a committed transaction rather than a released one with a
+		// broken audit trail.
+		tx.Status = model.TxStatusCommitted
+		log.Printf("[orchestration-manager] failed to persist release: tx=%s err=%v", txID, err)
+		return nil, fmt.Errorf("persist release state: %w", err)
+	}
 
 	log.Printf("[orchestration-manager] tx released: tx=%s holder=%s", txID, callerHolder)
 
@@ -353,8 +414,16 @@ func (m *Manager) timeoutTx(txID string) {
 
 	tx.Status = model.TxStatusTimedOut
 	tx.UpdatedAt = time.Now()
-	_ = m.storage.UpdateOrchTxStatus(txID, model.TxStatusTimedOut, "", tx.UpdatedAt)
-	m.addStateChangeLocked(txID, model.TxStatusCommitted, model.TxStatusTimedOut, "transaction timeout")
+	if err := m.transitionTxStatusLocked(txID, model.TxStatusCommitted, model.TxStatusTimedOut, "transaction timeout"); err != nil {
+		// A timed-out transaction must not be marked timed out unless the
+		// state-change record was persisted too; otherwise the audit trail is
+		// broken and the transaction would silently look released. Leave it
+		// committed and reschedule the timer so the timeout is retried.
+		tx.Status = model.TxStatusCommitted
+		m.setTxTimerLocked(txID, defaultTimeoutRetry)
+		log.Printf("[orchestration-manager] failed to persist timeout: tx=%s err=%v (will retry)", txID, err)
+		return
+	}
 
 	log.Printf("[orchestration-manager] tx timed out: tx=%s", txID)
 }

@@ -1900,6 +1900,46 @@ func (s *Storage) UpdateOrchTxStatus(txID string, status model.TxStatus, failRea
 	return err
 }
 
+// UpdateOrchTxStatusWithChange advances a transaction to a new status and
+// appends the matching state-change (audit) record in a single database
+// transaction. Both writes succeed together or fail together: if the audit
+// record cannot be persisted, the status update is rolled back so the
+// transaction does not move to a state whose transition was never recorded.
+func (s *Storage) UpdateOrchTxStatusWithChange(txID string, status model.TxStatus, failReason string, updatedAt time.Time, change *model.TxStateChange) error {
+	if change == nil {
+		change = &model.TxStateChange{}
+	}
+	change.TxID = txID
+	change.ToState = status
+	if change.CreatedAt.IsZero() {
+		change.CreatedAt = updatedAt
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx state transition: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+		UPDATE orch_txs SET status = ?, fail_reason = ?, updated_at = ? WHERE id = ?
+	`, status, failReason, updatedAt, txID); err != nil {
+		return fmt.Errorf("update tx status: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO orch_tx_state_changes (tx_id, from_state, to_state, reason, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, change.TxID, change.FromState, change.ToState, change.Reason, change.CreatedAt); err != nil {
+		return fmt.Errorf("persist tx state change: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx state transition: %w", err)
+	}
+	return nil
+}
+
 func (s *Storage) GetOrchTx(txID string) (*model.OrchestrationTx, error) {
 	row := s.db.QueryRow(`
 		SELECT id, holder, status, timeout_sec, fail_reason, created_at, updated_at, expires_at
