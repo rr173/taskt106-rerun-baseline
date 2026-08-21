@@ -853,10 +853,11 @@ func (m *Manager) executeOrchTxTransfer(ctx *execContext, item *model.HandoverRe
 	if tx == nil || tx.Holder != h.FromCaller {
 		return fmt.Errorf("tx no longer held by source")
 	}
-	if err := m.storage.TransferOrchTxHolder(item.ResourceKey, h.ToCaller, now); err != nil {
-		return err
-	}
-	if err := m.storage.TransferOrchTxLockHolder(item.ResourceKey, h.ToCaller); err != nil {
+	// Migrate the tx header and its lock-detail holders together as one atomic
+	// unit. Splitting these into two independent statements risks leaving the
+	// header migrated while the lock details still point at the old holder (or
+	// the reverse) if the second statement fails or the process dies in between.
+	if err := m.storage.TransferOrchTxHolderAndLocks(item.ResourceKey, h.ToCaller, now); err != nil {
 		return err
 	}
 	ctx.appliedTxs = append(ctx.appliedTxs, item.ResourceKey)
@@ -885,8 +886,7 @@ func (m *Manager) rollbackAllLocked(ctx *execContext, h *model.Handover, now tim
 		_ = m.storage.TransferReservationCaller(ctx.appliedRes[i], h.FromCaller, now)
 	}
 	for i := len(ctx.appliedTxs) - 1; i >= 0; i-- {
-		_ = m.storage.TransferOrchTxHolder(ctx.appliedTxs[i], h.FromCaller, now)
-		_ = m.storage.TransferOrchTxLockHolder(ctx.appliedTxs[i], h.FromCaller)
+		_ = m.storage.TransferOrchTxHolderAndLocks(ctx.appliedTxs[i], h.FromCaller, now)
 	}
 	for i := len(ctx.appliedLocks) - 1; i >= 0; i-- {
 		lease, _ := m.storage.GetActiveLease(ctx.appliedLocks[i])
