@@ -11,6 +11,9 @@ func (m *Manager) Issue(resourcePath, holder string, leaseSec int, now time.Time
 	if resourcePath == "" || holder == "" || leaseSec <= 0 {
 		return "", ErrTokenMismatch
 	}
+	if err := validateResourcePath(resourcePath); err != nil {
+		return "", err
+	}
 	sequence, err := m.store.NextFencingSequence(resourcePath)
 	if err != nil {
 		return "", err
