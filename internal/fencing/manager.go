@@ -37,11 +37,11 @@ func (m *Manager) Validate(token, resourcePath, holder string, now time.Time) mo
 	if err != nil {
 		return model.TokenValidation{Reason: err.Error(), ResourcePath: item.ResourcePath, Holder: item.Holder, Sequence: item.Sequence}
 	}
-	if item.Sequence < latest {
-		return model.TokenValidation{Reason: ErrTokenStale.Error(), ResourcePath: item.ResourcePath, Holder: item.Holder, Sequence: item.Sequence}
-	}
 	if item.RevokedAt != nil {
 		return model.TokenValidation{Reason: ErrTokenRevoked.Error(), ResourcePath: item.ResourcePath, Holder: item.Holder, Sequence: item.Sequence}
+	}
+	if item.Sequence < latest {
+		return model.TokenValidation{Reason: ErrTokenStale.Error(), ResourcePath: item.ResourcePath, Holder: item.Holder, Sequence: item.Sequence}
 	}
 	if !now.Before(item.ExpiresAt) {
 		return model.TokenValidation{Reason: ErrTokenExpired.Error(), ResourcePath: item.ResourcePath, Holder: item.Holder, Sequence: item.Sequence}

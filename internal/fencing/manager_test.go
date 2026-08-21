@@ -42,3 +42,34 @@ func TestFencingSequencesPersistAndRevocationIsObservable(t *testing.T) {
 		t.Fatal("revoked token should fail")
 	}
 }
+
+func TestRevokedTokenTakesPrecedenceOverStale(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "fencing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := NewManager(store)
+	now := time.Now().UTC()
+
+	stale, err := manager.Issue("prod/db", "worker-a", 60, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Issue("prod/db", "worker-a", 60, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Revoke(stale, "handover", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The revoked token's sequence is now stale too; the result must report
+	// revocation rather than staleness, since revocation is the stronger state.
+	got := manager.Validate(stale, "prod/db", "worker-a", now.Add(2*time.Second))
+	if got.Valid {
+		t.Fatalf("revoked stale token must not validate")
+	}
+	if got.Reason != ErrTokenRevoked.Error() {
+		t.Fatalf("expected revoked reason, got %q", got.Reason)
+	}
+}
