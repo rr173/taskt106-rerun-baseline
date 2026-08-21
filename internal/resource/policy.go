@@ -22,13 +22,15 @@ func (m *Manager) SetPolicy(path string, policy model.ResourcePolicy) (*model.Re
 	}
 	policy.Path = path
 	policy.UpdatedAt = time.Now().UTC()
-	if err := m.store.UpsertResourcePolicy(&policy); err != nil {
+	// Persist the policy together with its coordination event so that a
+	// failure writing the event rolls back the policy change as a whole
+	// instead of leaving a policy persisted without its audit trail.
+	if err := m.store.SetPolicyWithEvent(&policy, "resource_policy_changed", policy.RequiredHolder, "policy updated"); err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
 	m.policies[path] = policy
 	m.mu.Unlock()
-	_ = m.store.RecordCoordinationEvent("resource_policy_changed", path, policy.RequiredHolder, "policy updated")
 	return &policy, nil
 }
 

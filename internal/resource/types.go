@@ -33,4 +33,8 @@ type Store interface {
 	UpsertResourcePolicy(*model.ResourcePolicy) error
 	GetResourcePolicy(string) (*model.ResourcePolicy, error)
 	RecordCoordinationEvent(string, string, string, string) error
+	// SetPolicyWithEvent atomically persists a resource policy together with
+	// its coordination event. If the event write fails, the policy change must
+	// be rolled back instead of being persisted on its own.
+	SetPolicyWithEvent(policy *model.ResourcePolicy, eventType, holder, detail string) error
 }
