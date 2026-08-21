@@ -40,13 +40,15 @@ func (m *Manager) Create(req model.MaintenanceCreateRequest) (*model.Maintenance
 		return nil, ErrWindowOverlap
 	}
 	window := &model.MaintenanceWindow{ResourcePath: req.ResourcePath, Mode: req.Mode, StartAt: req.StartAt, EndAt: req.EndAt, Reason: req.Reason, Operator: req.Operator, Status: statusFor(req.StartAt, req.EndAt, time.Now().UTC()), CreatedAt: time.Now().UTC()}
-	if err := m.store.CreateMaintenanceWindow(window); err != nil {
+	// Persist the window and its creation audit event in a single transaction so
+	// that a failure to record the event rolls back the window too — leaving no
+	// orphan window blocking resources without an audit trail.
+	if err := m.store.CreateMaintenanceWindowWithEvent(window, "maintenance_created", window.ResourcePath, window.Operator, window.Reason); err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
 	m.windows[window.ID] = *window
 	m.mu.Unlock()
-	_ = m.store.RecordCoordinationEvent("maintenance_created", window.ResourcePath, window.Operator, window.Reason)
 	return window, nil
 }
 

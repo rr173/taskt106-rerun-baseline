@@ -8,6 +8,7 @@ import (
 
 type Store interface {
 	CreateMaintenanceWindow(*model.MaintenanceWindow) error
+	CreateMaintenanceWindowWithEvent(window *model.MaintenanceWindow, eventType, resourcePath, holder, detail string) error
 	ListMaintenanceWindows(string) ([]model.MaintenanceWindow, error)
 	UpdateMaintenanceStatus(int64, string) error
 	RecordCoordinationEvent(string, string, string, string) error
