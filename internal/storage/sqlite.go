@@ -1156,6 +1156,18 @@ func (s *Storage) UpdateLeaseExpiry(lockName string, newExpiresAt time.Time) err
 	return err
 }
 
+// UpdateLeaseExpiryAndDuration updates both the expiry time and the lease
+// duration of the active lease. Use this when the persisted lease_sec must
+// reflect the actually-effective duration (e.g. after shortening), so that the
+// saved duration stays consistent with expires_at instead of drifting to the
+// requested value.
+func (s *Storage) UpdateLeaseExpiryAndDuration(lockName string, newExpiresAt time.Time, newLeaseSec int) error {
+	_, err := s.db.Exec(`
+		UPDATE leases SET expires_at = ?, lease_sec = ? WHERE lock_name = ? AND active = 1
+	`, newExpiresAt, newLeaseSec, lockName)
+	return err
+}
+
 func (s *Storage) ListActiveLeases() ([]model.Lease, error) {
 	rows, err := s.db.Query(`
 		SELECT id, lock_name, holder, lease_sec, acquired_at, expires_at, active, fencing_token

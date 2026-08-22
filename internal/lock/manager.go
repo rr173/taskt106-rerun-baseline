@@ -1276,28 +1276,43 @@ func (m *Manager) ShortenLease(lockName string, newLeaseSec int) (*model.Lease, 
 	}
 
 	newExpiresAt := now.Add(time.Duration(newLeaseSec) * time.Second)
+	// 租约只能缩短不能延长: 若请求的目标时刻已超过当前到期时间, 则以当前到期时间为准,
+	// 不能超过锁真实还能持有的时间。
 	if newExpiresAt.After(lease.ExpiresAt) {
 		newExpiresAt = lease.ExpiresAt
 	}
 
-	if err := m.storage.UpdateLeaseExpiry(lockName, newExpiresAt); err != nil {
+	// 实际生效的租约时长必须以真实到期时间为准, 不能写成请求值, 否则与 expires_at 对不上。
+	effectiveLeaseSec := int(newExpiresAt.Sub(now).Seconds())
+	if effectiveLeaseSec < 0 {
+		effectiveLeaseSec = 0
+	}
+
+	if err := m.storage.UpdateLeaseExpiryAndDuration(lockName, newExpiresAt, effectiveLeaseSec); err != nil {
 		return nil, err
 	}
 
 	remaining := time.Until(newExpiresAt)
+	if remaining < 0 {
+		remaining = 0
+	}
 	m.setLeaseTimerLocked(lockName, remaining)
 
 	lease.ExpiresAt = newExpiresAt
-	lease.LeaseSec = newLeaseSec
+	lease.LeaseSec = effectiveLeaseSec
 	fillLeaseRemaining(lease)
 
 	if m.heatmapMgr != nil {
 		_ = m.heatmapMgr.IncrementLeaseShortenedCount(lockName)
 	}
 
-	m.addHistoryLocked(lockName, lease.Holder, model.OpCooldownStart,
-		fmt.Sprintf("租约缩短: 原剩余%.1fs, 新租约%ds, 新到期时间%s",
-			currentRemaining, newLeaseSec, newExpiresAt.Format(time.RFC3339)))
+	shortened := effectiveLeaseSec < newLeaseSec
+	historyDetail := fmt.Sprintf("租约缩短: 原剩余%.1fs, 请求%ds, 实际生效%ds, 新到期时间%s",
+		currentRemaining, newLeaseSec, effectiveLeaseSec, newExpiresAt.Format(time.RFC3339))
+	if shortened {
+		historyDetail += " (请求时长超过剩余持有时间, 已限制为实际到期时间)"
+	}
+	m.addHistoryLocked(lockName, lease.Holder, model.OpCooldownStart, historyDetail)
 
 	return lease, nil
 }
