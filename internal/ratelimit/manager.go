@@ -616,68 +616,92 @@ func (m *Manager) RequestTokens(callerID string, tokens int, waitable bool, wait
 	}
 
 	if remaining >= tokens {
+		// Consume quota in memory, then persist the event and the binding
+		// atomically. If persistence fails we roll the in-memory consumption
+		// back so a failed request consumes no quota and a retry is not
+		// penalized by an inflated UsedTokens.
 		b.UsedTokens += tokens
 		b.UpdatedAt = now
 		result.Allowed = true
 		result.Granted = tokens
 		result.UsedTokens = b.UsedTokens
 		result.Remaining = effectiveLim - b.UsedTokens
-	} else {
-		if waitable {
-			waitTimeout := waitSec
-			if waitTimeout <= 0 {
-				waitTimeout = 30
-			}
-			timeoutAt := now.Add(time.Duration(waitTimeout) * time.Second)
 
-			item := &model.RateLimitWaitItem{
-				CallerID:   callerID,
-				Tokens:     tokens,
-				EnqueuedAt: now,
-				TimeoutAt:  timeoutAt,
-			}
-			if err := m.storage.AddWaitItem(item); err != nil {
-				return nil, err
-			}
-			m.waitQueue = append(m.waitQueue, item)
-
-			position := 0
-			for i, q := range m.waitQueue {
-				if q.ID == item.ID {
-					position = i + 1
-					break
-				}
-			}
-
-			result.Queued = true
-			result.Position = position
-			result.Allowed = false
-			result.Granted = 0
-			result.Reason = fmt.Sprintf("queued for tokens: requested=%d, remaining=%d, position=%d", tokens, remaining, position)
-
-			event := &model.RateLimitEvent{
-				CallerID:   callerID,
-				PolicyName: b.PolicyName,
-				Requested:  tokens,
-				Granted:    0,
-				Allowed:    false,
-				Reason:     "queued",
-				CreatedAt:  now,
-			}
-			_ = m.storage.AddRateLimitEvent(event)
-
-			if err := m.storage.UpdateCallerBinding(b); err != nil {
-				return nil, err
-			}
-
-			log.Printf("[ratelimit] queued: caller=%s tokens=%d position=%d", callerID, tokens, position)
-			return result, nil
+		event := &model.RateLimitEvent{
+			CallerID:   callerID,
+			PolicyName: b.PolicyName,
+			Requested:  tokens,
+			Granted:    result.Granted,
+			Allowed:    result.Allowed,
+			Reason:     result.Reason,
+			CreatedAt:  now,
+		}
+		if err := m.storage.RecordTokenUsage(b, event); err != nil {
+			b.UsedTokens -= tokens
+			b.UpdatedAt = now
+			return nil, err
 		}
 
+		log.Printf("[ratelimit] granted: caller=%s tokens=%d remaining=%d", callerID, tokens, result.Remaining)
+		return result, nil
+	}
+
+	if waitable {
+		waitTimeout := waitSec
+		if waitTimeout <= 0 {
+			waitTimeout = 30
+		}
+		timeoutAt := now.Add(time.Duration(waitTimeout) * time.Second)
+
+		item := &model.RateLimitWaitItem{
+			CallerID:   callerID,
+			Tokens:     tokens,
+			EnqueuedAt: now,
+			TimeoutAt:  timeoutAt,
+		}
+		if err := m.storage.AddWaitItem(item); err != nil {
+			return nil, err
+		}
+		m.waitQueue = append(m.waitQueue, item)
+
+		position := 0
+		for i, q := range m.waitQueue {
+			if q.ID == item.ID {
+				position = i + 1
+				break
+			}
+		}
+
+		result.Queued = true
+		result.Position = position
 		result.Allowed = false
 		result.Granted = 0
-		result.Reason = fmt.Sprintf("insufficient quota: requested=%d, remaining=%d", tokens, remaining)
+		result.Reason = fmt.Sprintf("queued for tokens: requested=%d, remaining=%d, position=%d", tokens, remaining, position)
+
+		event := &model.RateLimitEvent{
+			CallerID:   callerID,
+			PolicyName: b.PolicyName,
+			Requested:  tokens,
+			Granted:    0,
+			Allowed:    false,
+			Reason:     "queued",
+			CreatedAt:  now,
+		}
+		if err := m.storage.RecordTokenUsage(b, event); err != nil {
+			// Drop the wait item we just enqueued so the caller isn't left
+			// waiting for a request whose event we failed to record.
+			m.waitQueue = removeWaitItem(m.waitQueue, item.ID)
+			_ = m.storage.RemoveWaitItem(item.ID)
+			return nil, err
+		}
+
+		log.Printf("[ratelimit] queued: caller=%s tokens=%d position=%d", callerID, tokens, position)
+		return result, nil
 	}
+
+	result.Allowed = false
+	result.Granted = 0
+	result.Reason = fmt.Sprintf("insufficient quota: requested=%d, remaining=%d", tokens, remaining)
 
 	event := &model.RateLimitEvent{
 		CallerID:   callerID,
@@ -688,13 +712,22 @@ func (m *Manager) RequestTokens(callerID string, tokens int, waitable bool, wait
 		Reason:     result.Reason,
 		CreatedAt:  now,
 	}
-	_ = m.storage.AddRateLimitEvent(event)
-
-	if err := m.storage.UpdateCallerBinding(b); err != nil {
+	if err := m.storage.RecordTokenUsage(b, event); err != nil {
 		return nil, err
 	}
 
 	return result, nil
+}
+
+func removeWaitItem(items []*model.RateLimitWaitItem, id int64) []*model.RateLimitWaitItem {
+	out := make([]*model.RateLimitWaitItem, 0, len(items))
+	for _, it := range items {
+		if it.ID == id {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 func (m *Manager) GetCallerStatus(callerID string) (*model.CallerStatus, error) {

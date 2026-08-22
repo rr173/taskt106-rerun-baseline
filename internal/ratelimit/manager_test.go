@@ -537,3 +537,93 @@ func TestReservationNoOverlap(t *testing.T) {
 		t.Fatalf("expected second reservation success (no overlap), got: %s", result2.Message)
 	}
 }
+
+// TestRequestTokensEventFailureRollsBackQuota verifies that when recording a
+// usage event fails, the request consumes no quota: the in-memory UsedTokens
+// is rolled back and a retry with the same amount still succeeds.
+func TestRequestTokensEventFailureRollsBackQuota(t *testing.T) {
+	m, cleanup := setupTestManager(t)
+	defer cleanup()
+
+	_, err := m.CreatePolicy("test-policy", model.AlgoFixedWindow, 60, 100, 0, "second")
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+
+	_, err = m.BindCaller("caller-1", "test-policy", 50)
+	if err != nil {
+		t.Fatalf("failed to bind caller: %v", err)
+	}
+
+	// First request must succeed and consume 10 of 50 tokens.
+	res, err := m.RequestTokens("caller-1", 10, false, 0)
+	if err != nil || !res.Allowed {
+		t.Fatalf("expected first request to succeed, err=%v allowed=%v", err, res.Allowed)
+	}
+
+	status, err := m.GetCallerStatus("caller-1")
+	if err != nil {
+		t.Fatalf("failed to get status: %v", err)
+	}
+	if status.UsedTokens != 10 {
+		t.Fatalf("expected 10 used tokens after first request, got %d", status.UsedTokens)
+	}
+
+	// Break the usage-event table so the next request's event write fails inside
+	// RecordTokenUsage. The whole transaction must roll back, so the binding
+	// update must not land either.
+	if _, err := m.storage.DB().Exec(`DROP TABLE rl_events`); err != nil {
+		t.Fatalf("failed to drop rl_events table: %v", err)
+	}
+
+	// This request would be granted (10 of 40 remaining), but recording the
+	// event fails, so it must return an error and leave the quota untouched.
+	_, err = m.RequestTokens("caller-1", 10, false, 0)
+	if err == nil {
+		t.Fatal("expected request to fail when usage-event recording fails")
+	}
+
+	status, err = m.GetCallerStatus("caller-1")
+	if err != nil {
+		t.Fatalf("failed to get status after failure: %v", err)
+	}
+	if status.UsedTokens != 10 {
+		t.Fatalf("expected used tokens to remain 10 after failed request, got %d (failed request consumed quota)", status.UsedTokens)
+	}
+	if status.Remaining != 40 {
+		t.Fatalf("expected 40 remaining after failed request, got %d", status.Remaining)
+	}
+
+	// Recreate the events table so a retry can proceed normally.
+	if _, err := m.storage.DB().Exec(`
+		CREATE TABLE IF NOT EXISTS rl_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			caller_id TEXT NOT NULL,
+			policy_name TEXT NOT NULL,
+			requested INTEGER NOT NULL,
+			granted INTEGER NOT NULL,
+			allowed INTEGER NOT NULL DEFAULT 1,
+			reason TEXT DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_rl_events_caller ON rl_events(caller_id);
+		CREATE INDEX IF NOT EXISTS idx_rl_events_policy ON rl_events(policy_name);
+	`); err != nil {
+		t.Fatalf("failed to recreate rl_events table: %v", err)
+	}
+
+	// The retry must succeed: the failed request must not have penalized it.
+	res, err = m.RequestTokens("caller-1", 10, false, 0)
+	if err != nil || !res.Allowed {
+		t.Fatalf("expected retry to succeed after failed request, err=%v allowed=%v", err, res.Allowed)
+	}
+
+	status, err = m.GetCallerStatus("caller-1")
+	if err != nil {
+		t.Fatalf("failed to get status after retry: %v", err)
+	}
+	if status.UsedTokens != 20 {
+		t.Fatalf("expected 20 used tokens after retry, got %d", status.UsedTokens)
+	}
+}
+
