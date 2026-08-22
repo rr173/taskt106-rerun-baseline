@@ -342,15 +342,6 @@ func (m *Manager) acquireLockLocked(lockName, holder string, leaseSec int, reent
 		}
 	}
 
-	lock.Status = model.LockStatusHeld
-	lock.Holder = holder
-	lock.Reentrant = reentrant
-	lock.Count = 1
-	lock.UpdatedAt = now
-	if err := m.storage.UpsertLock(lock); err != nil {
-		return nil, err
-	}
-
 	lease := &model.Lease{
 		LockName:   lockName,
 		Holder:     holder,
@@ -366,7 +357,16 @@ func (m *Manager) acquireLockLocked(lockName, holder string, leaseSec int, reent
 		}
 		lease.FencingToken = token
 	}
-	if err := m.storage.CreateLease(lease); err != nil {
+
+	// Mark the lock held and persist it together with the lease in one
+	// transaction: a lease write failure must not leave the lock in the held
+	// state with no lease and no expiry timer to release it.
+	lock.Status = model.LockStatusHeld
+	lock.Holder = holder
+	lock.Reentrant = reentrant
+	lock.Count = 1
+	lock.UpdatedAt = now
+	if err := m.storage.AcquireLockAndLease(lock, lease); err != nil {
 		return nil, err
 	}
 
@@ -514,15 +514,6 @@ func (m *Manager) tryGrantNextLocked(lockName string) (*model.Lock, error) {
 		}
 	}
 
-	lock.Status = model.LockStatusHeld
-	lock.Holder = item.Holder
-	lock.Reentrant = item.Reentrant
-	lock.Count = 1
-	lock.UpdatedAt = now
-	if err := m.storage.UpsertLock(lock); err != nil {
-		return nil, err
-	}
-
 	lease := &model.Lease{
 		LockName:   lockName,
 		Holder:     item.Holder,
@@ -538,7 +529,15 @@ func (m *Manager) tryGrantNextLocked(lockName string) (*model.Lock, error) {
 		}
 		lease.FencingToken = token
 	}
-	if err := m.storage.CreateLease(lease); err != nil {
+
+	// Grant the held lock and its lease atomically so a lease write failure
+	// cannot leave the lock held without an active lease or expiry timer.
+	lock.Status = model.LockStatusHeld
+	lock.Holder = item.Holder
+	lock.Reentrant = item.Reentrant
+	lock.Count = 1
+	lock.UpdatedAt = now
+	if err := m.storage.AcquireLockAndLease(lock, lease); err != nil {
 		return nil, err
 	}
 
@@ -1186,15 +1185,6 @@ func (m *Manager) acquireLockNoQueueLocked(lockName, holder string, leaseSec int
 		return nil, fmt.Errorf("lock held by %s", lock.Holder)
 	}
 
-	lock.Status = model.LockStatusHeld
-	lock.Holder = holder
-	lock.Reentrant = reentrant
-	lock.Count = 1
-	lock.UpdatedAt = now
-	if err := m.storage.UpsertLock(lock); err != nil {
-		return nil, err
-	}
-
 	lease := &model.Lease{
 		LockName:   lockName,
 		Holder:     holder,
@@ -1210,7 +1200,16 @@ func (m *Manager) acquireLockNoQueueLocked(lockName, holder string, leaseSec int
 		}
 		lease.FencingToken = token
 	}
-	if err := m.storage.CreateLease(lease); err != nil {
+
+	// Persist the held lock and its lease in a single transaction so a lease
+	// write failure cannot strand the lock in the held state without a lease
+	// or expiry timer, which would block every other worker from acquiring it.
+	lock.Status = model.LockStatusHeld
+	lock.Holder = holder
+	lock.Reentrant = reentrant
+	lock.Count = 1
+	lock.UpdatedAt = now
+	if err := m.storage.AcquireLockAndLease(lock, lease); err != nil {
 		return nil, err
 	}
 

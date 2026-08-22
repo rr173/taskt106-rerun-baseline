@@ -1144,6 +1144,59 @@ func (s *Storage) CreateLease(l *model.Lease) error {
 	return nil
 }
 
+// AcquireLockAndLease writes the held lock row and its active lease in a single
+// transaction so the two records are committed together. If the commit fails
+// (for example the lease insert rejects a constraint violation), neither the
+// held lock nor the lease is left behind, which prevents an orphaned held lock
+// with no lease and no expiry timer from blocking other workers. Callers must
+// already have marked lock.Status = LockStatusHeld and filled lease fields.
+func (s *Storage) AcquireLockAndLease(lock *model.Lock, lease *model.Lease) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	reentrantInt := 0
+	if lock.Reentrant {
+		reentrantInt = 1
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO locks (name, status, holder, reentrant, count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET
+			status = excluded.status,
+			holder = excluded.holder,
+			reentrant = excluded.reentrant,
+			count = excluded.count,
+			updated_at = excluded.updated_at
+	`, lock.Name, lock.Status, lock.Holder, reentrantInt, lock.Count, lock.CreatedAt, lock.UpdatedAt); err != nil {
+		return err
+	}
+
+	activeInt := 0
+	if lease.Active {
+		activeInt = 1
+	}
+	result, err := tx.Exec(`
+		INSERT INTO leases (lock_name, holder, lease_sec, acquired_at, expires_at, active, fencing_token)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, lease.LockName, lease.Holder, lease.LeaseSec, lease.AcquiredAt, lease.ExpiresAt, activeInt, lease.FencingToken)
+	if err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	err = s.db.QueryRow(`SELECT id FROM locks WHERE name = ?`, lock.Name).Scan(&lock.ID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	lease.ID, _ = result.LastInsertId()
+	return nil
+}
+
 func (s *Storage) DeactivateLease(lockName string) error {
 	_, err := s.db.Exec(`UPDATE leases SET active = 0 WHERE lock_name = ? AND active = 1`, lockName)
 	return err
