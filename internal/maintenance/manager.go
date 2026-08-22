@@ -2,6 +2,7 @@ package maintenance
 
 import (
 	"task106/internal/model"
+	"task106/internal/namespace"
 	"time"
 )
 
@@ -29,12 +30,15 @@ func (m *Manager) Create(req model.MaintenanceCreateRequest) (*model.Maintenance
 	if req.Mode != model.MaintenanceDrain && req.Mode != model.MaintenanceForce {
 		return nil, ErrInvalidWindow
 	}
-	existing, err := m.store.ListMaintenanceWindows(req.ResourcePath)
+	existing, err := m.store.ListMaintenanceWindows("")
 	if err != nil {
 		return nil, err
 	}
 	for _, item := range existing {
 		if item.Status == "cancelled" || item.EndAt.Before(req.StartAt) || item.StartAt.After(req.EndAt) {
+			continue
+		}
+		if !namespace.Overlaps(item.ResourcePath, req.ResourcePath) {
 			continue
 		}
 		return nil, ErrWindowOverlap

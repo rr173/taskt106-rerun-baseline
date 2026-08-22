@@ -38,3 +38,35 @@ func TestOverlappingWindowsAreRejectedAndCancellationUnblocks(t *testing.T) {
 		t.Fatalf("expected cancellation to unblock: %v %v", blocked, err)
 	}
 }
+
+func TestParentChildOverlappingWindowsAreRejected(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "maintenance.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := NewManager(store)
+	if err := manager.Start(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(time.Minute)
+	// Parent window on "prod" active for an hour.
+	if _, err := manager.Create(model.MaintenanceCreateRequest{ResourcePath: "prod", Mode: model.MaintenanceDrain, StartAt: now, EndAt: now.Add(time.Hour), Reason: "schema change", Operator: "ops"}); err != nil {
+		t.Fatal(err)
+	}
+	// Overlapping child window on "prod/child" must be rejected: parent and child share one coordination scope.
+	if _, err := manager.Create(model.MaintenanceCreateRequest{ResourcePath: "prod/child", Mode: model.MaintenanceForce, StartAt: now.Add(10 * time.Minute), EndAt: now.Add(2 * time.Hour), Reason: "overlap", Operator: "ops"}); err != ErrWindowOverlap {
+		t.Fatalf("expected parent/child overlap error, got %v", err)
+	}
+	// Reverse direction: child window first, then overlapping parent window must also be rejected.
+	if _, err := manager.Create(model.MaintenanceCreateRequest{ResourcePath: "staging/api", Mode: model.MaintenanceDrain, StartAt: now, EndAt: now.Add(time.Hour), Reason: "redeploy", Operator: "ops"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(model.MaintenanceCreateRequest{ResourcePath: "staging", Mode: model.MaintenanceForce, StartAt: now.Add(10 * time.Minute), EndAt: now.Add(2 * time.Hour), Reason: "overlap", Operator: "ops"}); err != ErrWindowOverlap {
+		t.Fatalf("expected child/parent overlap error, got %v", err)
+	}
+	// A non-overlapping sibling under a different scope is allowed through.
+	if _, err := manager.Create(model.MaintenanceCreateRequest{ResourcePath: "dev", Mode: model.MaintenanceForce, StartAt: now, EndAt: now.Add(time.Hour), Reason: "isolated", Operator: "ops"}); err != nil {
+		t.Fatalf("expected non-overlapping window to be accepted, got %v", err)
+	}
+}
