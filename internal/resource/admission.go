@@ -52,17 +52,11 @@ func (m *Manager) Decide(path, holder string, leaseSec int, now time.Time) (*Dec
 	m.mu.RLock()
 	policy, ok := m.policies[path]
 	m.mu.RUnlock()
-	// A child without its own policy inherits the max lease bound from the
-	// nearest ancestor that sets one, so a parent's max lease policy constrains
-	// children that do not otherwise override it. Holder authorization rules
-	// (required/allowed holders) are not inherited: those are per-resource.
-	inheritedMaxLease := 0
-	if !ok {
-		if ancestor := m.effectivePolicy(path); ancestor != nil && ancestor.MaxLeaseSec > 0 {
-			inheritedMaxLease = ancestor.MaxLeaseSec
-			decision.Policy = ancestor
-		}
-	}
+	// A child resource without its own policy inherits the max lease bound
+	// from the nearest ancestor that sets one, so a parent's max lease policy
+	// constrains children that do not otherwise override it. Holder
+	// authorization (required/allowed holders) is not inherited: those rules
+	// stay per-resource and only apply when the path sets its own policy.
 	if ok {
 		decision.Policy = &policy
 		if policy.MaxLeaseSec > 0 && leaseSec > policy.MaxLeaseSec {
@@ -77,9 +71,12 @@ func (m *Manager) Decide(path, holder string, leaseSec int, now time.Time) (*Dec
 			decision.Allowed = false
 			decision.Reasons = append(decision.Reasons, ErrPolicyDenied.Error())
 		}
-	} else if inheritedMaxLease > 0 && leaseSec > inheritedMaxLease {
-		decision.Allowed = false
-		decision.Reasons = append(decision.Reasons, ErrLeaseTooLong.Error())
+	} else if ancestor := m.effectivePolicy(path); ancestor != nil {
+		decision.Policy = ancestor
+		if ancestor.MaxLeaseSec > 0 && leaseSec > ancestor.MaxLeaseSec {
+			decision.Allowed = false
+			decision.Reasons = append(decision.Reasons, ErrLeaseTooLong.Error())
+		}
 	}
 	return decision, nil
 }
