@@ -32,11 +32,10 @@ func (m *Manager) SetState(path string, next model.ResourceState, reason string)
 	item.State = next
 	item.Generation++
 	item.UpdatedAt = time.Now().UTC()
-	if err := m.store.UpsertResource(item); err != nil {
+	if err := m.store.SetResourceStateWithEvent(item, "resource_state_changed", item.Owner, fmt.Sprintf("%s: %s", next, reason)); err != nil {
 		return nil, err
 	}
 	m.resources[item.Path] = *item
-	_ = m.store.RecordCoordinationEvent("resource_state_changed", item.Path, item.Owner, fmt.Sprintf("%s: %s", next, reason))
 	return item, nil
 }
 

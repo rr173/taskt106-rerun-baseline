@@ -33,4 +33,5 @@ type Store interface {
 	UpsertResourcePolicy(*model.ResourcePolicy) error
 	GetResourcePolicy(string) (*model.ResourcePolicy, error)
 	RecordCoordinationEvent(string, string, string, string) error
+	SetResourceStateWithEvent(item *model.Resource, eventType, holder, detail string) error
 }
