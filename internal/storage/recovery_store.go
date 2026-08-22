@@ -29,6 +29,29 @@ func (s *Storage) FinishRecoveryCheckpoint(id int64, status string, issues []str
 	return err
 }
 
+// FinishRecoveryCheckpointWithEvent marks the checkpoint complete and records the
+// coordination event in a single transaction so the two writes commit together. If
+// recording the event fails, the checkpoint stays in its prior (running) state and the
+// next inspection can resume from the correct state.
+func (s *Storage) FinishRecoveryCheckpointWithEvent(id int64, status string, issues []string, finished time.Time, eventType, resourcePath, holder, detail string) error {
+	encoded, err := json.Marshal(issues)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE coord_recovery_checkpoints SET status = ?, finished_at = ?, issues_json = ? WHERE id = ?`, status, finished, string(encoded), id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO coordination_events(event_type, resource_path, holder, detail, created_at) VALUES(?, ?, ?, ?, ?)`, eventType, resourcePath, holder, detail, finished); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Storage) GetRecoveryCheckpoint(id int64) (*model.RecoveryCheckpoint, error) {
 	row := s.db.QueryRow(`SELECT id, scope, status, started_at, finished_at, issues_json, created_at FROM coord_recovery_checkpoints WHERE id = ?`, id)
 	return scanRecoveryCheckpoint(row)
