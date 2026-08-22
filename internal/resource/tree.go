@@ -11,7 +11,7 @@ func (m *Manager) Children(path string) []model.Resource {
 	result := make([]model.Resource, 0)
 	for _, item := range m.resources {
 		if item.ParentPath == path {
-			result = append(result, item)
+			result = append(result, *cloneResource(&item))
 		}
 	}
 	return namespaceOrder(result)
@@ -23,7 +23,7 @@ func (m *Manager) Descendants(path string) []model.Resource {
 	result := make([]model.Resource, 0)
 	for _, item := range m.resources {
 		if item.Path != path && namespace.IsSameOrDescendant(item.Path, path) {
-			result = append(result, item)
+			result = append(result, *cloneResource(&item))
 		}
 	}
 	return namespaceOrder(result)

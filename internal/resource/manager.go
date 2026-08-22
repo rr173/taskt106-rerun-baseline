@@ -61,9 +61,9 @@ func (m *Manager) Register(req model.ResourceCreateRequest) (*model.Resource, er
 		}
 	}
 	now := time.Now().UTC()
-	item := &model.Resource{Path: path, ParentPath: parent, Owner: req.Owner, State: model.ResourceActive, Generation: 1, Labels: req.Labels, CreatedAt: now, UpdatedAt: now}
+	item := &model.Resource{Path: path, ParentPath: parent, Owner: req.Owner, State: model.ResourceActive, Generation: 1, Labels: cloneLabels(req.Labels), CreatedAt: now, UpdatedAt: now}
 	if existing, _ := m.store.GetResource(path); existing != nil {
-		return existing, nil
+		return cloneResource(existing), nil
 	}
 	if err := m.store.UpsertResource(item); err != nil {
 		return nil, err
@@ -72,7 +72,7 @@ func (m *Manager) Register(req model.ResourceCreateRequest) (*model.Resource, er
 	m.resources[path] = *item
 	m.mu.Unlock()
 	_ = m.store.RecordCoordinationEvent("resource_registered", path, req.Owner, "resource registered")
-	return item, nil
+	return cloneResource(item), nil
 }
 
 func (m *Manager) Ensure(path, owner string) (*model.Resource, error) {
@@ -84,7 +84,7 @@ func (m *Manager) Ensure(path, owner string) (*model.Resource, error) {
 	item, ok := m.resources[normalized]
 	m.mu.RUnlock()
 	if ok {
-		return &item, nil
+		return cloneResource(&item), nil
 	}
 	return m.Register(model.ResourceCreateRequest{Path: normalized, Owner: owner})
 }
@@ -98,8 +98,7 @@ func (m *Manager) Get(path string) (*model.Resource, error) {
 	item, ok := m.resources[path]
 	m.mu.RUnlock()
 	if ok {
-		copy := item
-		return &copy, nil
+		return cloneResource(&item), nil
 	}
 	return nil, ErrNotFound
 }
@@ -117,7 +116,7 @@ func (m *Manager) List(root string) ([]model.Resource, error) {
 	}
 	for _, item := range m.resources {
 		if root == "" || namespace.IsSameOrDescendant(item.Path, root) {
-			items = append(items, item)
+			items = append(items, *cloneResource(&item))
 		}
 	}
 	return namespaceOrder(items), nil
