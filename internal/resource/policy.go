@@ -55,7 +55,7 @@ func (m *Manager) ListPolicies() []model.ResourcePolicy {
 	for _, policy := range m.policies {
 		result = append(result, policy)
 	}
-	sort.Slice(result, func(i, j int) bool {
+	sort.SliceStable(result, func(i, j int) bool {
 		return result[i].Path < result[j].Path
 	})
 	return result

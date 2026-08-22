@@ -2,6 +2,7 @@ package resource
 
 import (
 	"path/filepath"
+	"sort"
 	"task106/internal/model"
 	"task106/internal/storage"
 	"testing"
@@ -58,4 +59,58 @@ func TestResourceLifecycleAndPolicySurviveRestart(t *testing.T) {
 	if err != nil || policy.MaxLeaseSec != 20 {
 		t.Fatalf("resource policy was not restored: %+v %v", policy, err)
 	}
+}
+
+func TestListPoliciesStableByPath(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "resource.db")
+	store, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := NewManager(store)
+	if err := manager.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := []string{
+		"prod",
+		"prod/payments",
+		"prod/payments/db",
+		"prod/orders",
+		"staging",
+		"staging/cache",
+		"audit",
+	}
+	for _, p := range paths {
+		if _, err := manager.Register(model.ResourceCreateRequest{Path: p, Owner: "platform"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := manager.SetPolicy(p, model.ResourcePolicy{MaxLeaseSec: 30}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Inserting policies again must not change the order (stable).
+	for _, p := range paths {
+		if _, err := manager.SetPolicy(p, model.ResourcePolicy{MaxLeaseSec: 45}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := manager.ListPolicies()
+	if len(got) != len(paths) {
+		t.Fatalf("expected %d policies, got %d", len(paths), len(got))
+	}
+	if !sort.StringsAreSorted(extractPaths(got)) {
+		t.Fatalf("policies not sorted by path: %v", extractPaths(got))
+	}
+}
+
+func extractPaths(policies []model.ResourcePolicy) []string {
+	out := make([]string, 0, len(policies))
+	for _, p := range policies {
+		out = append(out, p.Path)
+	}
+	return out
 }
