@@ -116,7 +116,7 @@ func (m *Manager) List(root string) ([]model.Resource, error) {
 		}
 	}
 	for _, item := range m.resources {
-		if root == "" || namespace.IsSameOrDescendant(item.Path, root) {
+		if root == "" || namespace.IsAncestor(root, item.Path) {
 			items = append(items, item)
 		}
 	}

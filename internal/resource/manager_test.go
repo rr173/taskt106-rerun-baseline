@@ -8,6 +8,40 @@ import (
 	"time"
 )
 
+func TestListByRootExcludesRootItself(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "resource.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := NewManager(store)
+	if err := manager.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"prod", "prod/payments", "prod/payments/db", "prod/billing", "staging"} {
+		if _, err := manager.Register(model.ResourceCreateRequest{Path: p, Owner: "platform"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items, err := manager.List("prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, item := range items {
+		paths = append(paths, item.Path)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 descendants under prod, got %d: %v", len(items), paths)
+	}
+	for _, p := range paths {
+		if p == "prod" {
+			t.Fatalf("root resource must not be listed as its own descendant: %v", paths)
+		}
+	}
+}
+
 func TestResourceLifecycleAndPolicySurviveRestart(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "resource.db")
 	store, err := storage.New(dbPath)
