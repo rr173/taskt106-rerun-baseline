@@ -29,6 +29,13 @@ func (m *Manager) Create(req model.MaintenanceCreateRequest) (*model.Maintenance
 	if req.Mode != model.MaintenanceDrain && req.Mode != model.MaintenanceForce {
 		return nil, ErrInvalidWindow
 	}
+	// Hold the write lock across the overlap check and the insert so that
+	// concurrent requests for the same time range are serialized: the first
+	// request commits its window before any other request performs the check,
+	// forcing all overlapping followers to report ErrWindowOverlap instead of
+	// racing past the check and creating a duplicate.
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	existing, err := m.store.ListMaintenanceWindows(req.ResourcePath)
 	if err != nil {
 		return nil, err
@@ -43,9 +50,7 @@ func (m *Manager) Create(req model.MaintenanceCreateRequest) (*model.Maintenance
 	if err := m.store.CreateMaintenanceWindow(window); err != nil {
 		return nil, err
 	}
-	m.mu.Lock()
 	m.windows[window.ID] = *window
-	m.mu.Unlock()
 	_ = m.store.RecordCoordinationEvent("maintenance_created", window.ResourcePath, window.Operator, window.Reason)
 	return window, nil
 }
