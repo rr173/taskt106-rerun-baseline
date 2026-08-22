@@ -470,7 +470,11 @@ func (m *Manager) releaseLockLocked(lockName, holder string) (*ReleaseResult, er
 }
 
 func (m *Manager) tryGrantNextLocked(lockName string) (*model.Lock, error) {
-	item, err := m.storage.Dequeue(lockName)
+	// Peek the head of the queue without removing it: a queued request must
+	// re-check current admission conditions before it can be granted. If a
+	// maintenance window (or any other admission gate) is now active, the
+	// request must stay in the queue rather than being granted or skipped.
+	item, err := m.storage.PeekWaitQueue(lockName)
 	if err != nil {
 		return nil, err
 	}
@@ -480,11 +484,25 @@ func (m *Manager) tryGrantNextLocked(lockName string) (*model.Lock, error) {
 
 	now := time.Now()
 	if item.TimeoutAt.Before(now) {
+		if _, err := m.storage.Dequeue(lockName); err != nil {
+			return nil, err
+		}
 		m.addHistoryLocked(lockName, item.Holder, model.OpTimeout, "timed out before grant")
 		if m.heatmap != nil {
 			m.heatmap.RecordLockTimeoutWithEnqueue(lockName, item.Holder, item.EnqueuedAt)
 		}
 		return m.tryGrantNextLocked(lockName)
+	}
+
+	// Re-check admission (resource state + maintenance window + policy)
+	// before granting. A window that became active while the request was
+	// queued blocks the grant; the request stays at the head of the queue.
+	if m.admissionGuard != nil {
+		if err := m.admissionGuard.BeforeAcquire(lockName, item.Holder, item.LeaseSec); err != nil {
+			m.addHistoryLocked(lockName, item.Holder, model.OpAcquire,
+				"blocked from queue: "+err.Error())
+			return nil, nil
+		}
 	}
 
 	if m.budgetMgr != nil {
@@ -493,11 +511,24 @@ func (m *Manager) tryGrantNextLocked(lockName string) (*model.Lock, error) {
 			log.Printf("[lock-manager] budget check error on grant: holder=%s lock=%s err=%v", item.Holder, lockName, err)
 		}
 		if checkResult != nil && !checkResult.Allowed {
+			if _, err := m.storage.Dequeue(lockName); err != nil {
+				return nil, err
+			}
 			m.addHistoryLocked(lockName, item.Holder, model.OpTimeout,
 				fmt.Sprintf("skipped from queue: budget exhausted (consumed=%d, limit=%d, remaining=%d)",
 					checkResult.ConsumedUnits, checkResult.BudgetLimit, checkResult.RemainingUnits))
 			return m.tryGrantNextLocked(lockName)
 		}
+	}
+
+	// Admission is clear; now remove the head item and grant it.
+	item, err = m.storage.Dequeue(lockName)
+	if err != nil {
+		return nil, err
+	}
+	if item == nil {
+		// Queue drained between the peek and the dequeue.
+		return nil, nil
 	}
 
 	lock, err := m.storage.GetLock(lockName)

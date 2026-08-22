@@ -1225,6 +1225,29 @@ func (s *Storage) Dequeue(lockName string) (*model.WaitQueueItem, error) {
 	return &item, nil
 }
 
+// PeekWaitQueue returns the head of a lock's wait queue without removing it,
+// so callers can re-evaluate admission conditions (e.g. an active maintenance
+// window) before committing to a grant. A queued request that is now blocked
+// must stay in the queue rather than being granted or dropped.
+func (s *Storage) PeekWaitQueue(lockName string) (*model.WaitQueueItem, error) {
+	row := s.db.QueryRow(`
+		SELECT id, lock_name, holder, reentrant, lease_sec, enqueued_at, timeout_at
+		FROM wait_queue WHERE lock_name = ? ORDER BY id LIMIT 1
+	`, lockName)
+
+	var item model.WaitQueueItem
+	var reentrantInt int
+	err := row.Scan(&item.ID, &item.LockName, &item.Holder, &reentrantInt, &item.LeaseSec, &item.EnqueuedAt, &item.TimeoutAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	item.Reentrant = reentrantInt != 0
+	return &item, nil
+}
+
 func (s *Storage) RemoveFromQueue(lockName, holder string) error {
 	_, err := s.db.Exec(`DELETE FROM wait_queue WHERE lock_name = ? AND holder = ?`, lockName, holder)
 	return err
